@@ -1,0 +1,10 @@
+node_modules/
+dist/
+build/
+.env
+*.log
+.DS_Store
+*.pdf
+# Keep the PDF for now since they are part of the initial request, 
+# but usually we'd ignore them if they were large/generated.
+# User asked "not to check in node modules or any of the usually excluded objects".
