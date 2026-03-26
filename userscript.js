@@ -1,11 +1,14 @@
 // ==UserScript==
 // @name         Catalog Relay Userscript
 // @namespace    http://tampermonkey.net/
-// @version      0.1
-// @description  Relays catalog queries to the proxy server
+// @version      0.2
+// @description  Relays catalog queries and intercepts cart JSON to the proxy server
 // @author       Gemini CLI
 // @match        http://localhost:4000/*
-// @grant        none
+// @match        https://www.amayama.com/*
+// @grant        GM_registerMenuCommand
+// @grant        GM_setValue
+// @grant        GM_getValue
 // ==/UserScript==
 
 (function() {
@@ -13,43 +16,86 @@
 
     const ws = new WebSocket('ws://localhost:3000');
 
-    ws.onopen = () => {
-        console.log('Connected to Relay Proxy');
-    };
+    // Default site configurations
+    const DEFAULT_CONFIGS = [
+        {
+            name: 'amayama',
+            urlPattern: 'amayama\\.com/en/cart/quantity',
+            parser: 'amayama'
+        }
+    ];
 
-    ws.onmessage = async (event) => {
-        const msg = JSON.parse(event.data);
-        console.log('Received query:', msg);
+    let siteConfigs = GM_getValue('siteConfigs', DEFAULT_CONFIGS);
 
-        if (msg.action === 'query') {
-            const results = await performSearch(msg.query.part);
-            ws.send(JSON.stringify({
-                id: msg.id,
-                data: results
+    GM_registerMenuCommand("Add Interceptor URL", () => {
+        const name = prompt("Site Name (e.g. Amayama):");
+        const pattern = prompt("URL Pattern (Regex):");
+        const parser = prompt("Parser Name (e.g. amayama):");
+        if (name && pattern && parser) {
+            siteConfigs.push({ name, urlPattern: pattern, parser });
+            GM_setValue('siteConfigs', siteConfigs);
+            alert(`Added interceptor for ${name}`);
+        }
+    });
+
+    const parsers = {
+        amayama: (json) => {
+            if (!json.data || !json.data.items) return null;
+            return Object.values(json.data.items).map(item => ({
+                id: item.goodPriceId,
+                name: item.notes || "Unknown Item", // Amayama doesn't always have names in the JSON items list
+                price: parseFloat(item.totalPrice),
+                priceUSD: item.priceUSD,
+                qty: item.quantity,
+                warehouse: item.warehouseName,
+                totalWeight: parseFloat(item.totalWeight)
             }));
         }
     };
 
+    ws.onopen = () => console.log('Connected to Relay Proxy');
+
+    ws.onmessage = async (event) => {
+        const msg = JSON.parse(event.data);
+        if (msg.action === 'query') {
+            const results = await performSearch(msg.query.part);
+            ws.send(JSON.stringify({ id: msg.id, data: results }));
+        }
+    };
+
+    // Intercept Fetch
+    const originalFetch = window.fetch;
+    window.fetch = async (...args) => {
+        const response = await originalFetch(...args);
+        const url = args[0] instanceof Request ? args[0].url : args[0];
+
+        const config = siteConfigs.find(c => new RegExp(c.urlPattern).test(url));
+        if (config && parsers[config.parser]) {
+            const clone = response.clone();
+            clone.json().then(data => {
+                const parsed = parsers[config.parser](data);
+                if (parsed) {
+                    ws.send(JSON.stringify({
+                        type: 'INTERCEPTED_DATA',
+                        site: config.name,
+                        data: parsed,
+                        timestamp: new Date().toISOString()
+                    }));
+                }
+            }).catch(e => console.error('Failed to parse intercepted JSON', e));
+        }
+        return response;
+    };
+
+    // Helper for manual queries
     async function performSearch(queryText) {
-        // If we are on the search page
         const searchInput = document.getElementById('search-input');
         const searchButton = document.getElementById('search-button');
 
         if (searchInput && searchButton) {
             searchInput.value = queryText;
             searchButton.click();
-            
-            // Wait for results to load (simulated by page reload)
-            // In a real SPA we might wait for a DOM element
             return new Promise((resolve) => {
-                // For this mock, we'll just wait a bit and scrape if we're on the results page
-                // But since click() reloads the page, this script will restart.
-                // We need a way to persist the request ID or handle the page reload.
-                
-                // IDEA: The proxy server should handle the "waiting" if the page reloads.
-                // But the userscript restarts on reload.
-                
-                // SIMPLER VERSION for Mock: Use fetch() to get the results instead of clicking.
                 fetch(`/search?q=${encodeURIComponent(queryText)}`)
                     .then(res => res.text())
                     .then(html => {
